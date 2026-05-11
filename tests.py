@@ -16,8 +16,12 @@ FEATS_PATH  = Path("data/processed/features.parquet")
 LABELS_PATH = Path("data/processed/labels.parquet")
 
 EXPECTED_OHLCV = {"Open", "High", "Low", "Close", "Volume"}
-EXPECTED_FEATURES = {"ret_1","ret_5","ret_20","dist_sma10","dist_sma20","dist_sma50",
-                     "pct_52w","vol_z20","rsi14"}
+EXPECTED_FEATURES = {
+    "ret_1","ret_5","ret_20",
+    "dist_sma10","dist_sma20","dist_sma50","dist_sma200",
+    "pct_52w","vol_z20","rsi14",
+    "down_streak","vol_regime","mom_rank_xs",
+}
 
 # Pipeline parameters that must stay aligned with build_labels.py
 HORIZON_DAYS = 20
@@ -72,7 +76,7 @@ def test_features_schema(features):
         check("features file exists", False, f"missing {FEATS_PATH}")
         return False
     check("features file exists", True)
-    check("features has all 9 feature columns",
+    check("features has all expected feature columns",
           EXPECTED_FEATURES.issubset(features.columns),
           f"missing: {EXPECTED_FEATURES - set(features.columns)}")
     check("features indexed by (Date, Ticker)",
@@ -109,6 +113,35 @@ def test_rsi_in_range(features):
     r = features["rsi14"].dropna()
     check("rsi14 stays within [0, 1]", ((r >= -1e-9) & (r <= 1+1e-9)).all(),
           f"min={r.min():.4f}, max={r.max():.4f}")
+
+
+def test_down_streak_non_negative_integers(features):
+    """Down-day streak must be a non-negative integer count."""
+    if features is None or "down_streak" not in features.columns: return
+    s = features["down_streak"].dropna()
+    is_nonneg = (s >= 0).all()
+    is_intlike = np.allclose(s, s.round())
+    check("down_streak is non-negative", bool(is_nonneg), f"min={s.min()}")
+    check("down_streak is integer-valued", bool(is_intlike), f"max fractional part = {(s - s.round()).abs().max():.2e}")
+
+
+def test_mom_rank_xs_in_range(features):
+    """Cross-sectional momentum rank is computed with pct=True so must lie in [0, 1]."""
+    if features is None or "mom_rank_xs" not in features.columns: return
+    r = features["mom_rank_xs"].dropna()
+    check("mom_rank_xs stays within [0, 1]", ((r >= -1e-9) & (r <= 1+1e-9)).all(),
+          f"min={r.min():.4f}, max={r.max():.4f}")
+
+
+def test_mom_rank_xs_actually_cross_sectional(features):
+    """On any given date, mom_rank_xs values across tickers should span a wide range.
+    If they all collapsed near one value, the cross-sectional rank wasn't actually applied.
+    """
+    if features is None or "mom_rank_xs" not in features.columns: return
+    by_date_range = features["mom_rank_xs"].groupby(level=0).apply(lambda s: s.max() - s.min())
+    median_range = by_date_range.median()
+    check("mom_rank_xs varies across tickers within a date (median range ≥ 0.5)",
+          median_range >= 0.5, f"median per-day range = {median_range:.3f}")
 
 
 def test_labels_schema(labels):
@@ -199,6 +232,9 @@ def main():
     test_features_one_row_per_date_ticker(features)
     test_pct_52w_in_range(features)
     test_rsi_in_range(features)
+    test_down_streak_non_negative_integers(features)
+    test_mom_rank_xs_in_range(features)
+    test_mom_rank_xs_actually_cross_sectional(features)
     test_labels_schema(labels)
     test_label_positive_rate_sane(labels)
     test_labels_drop_recent_horizon(labels, prices)
